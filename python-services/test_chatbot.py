@@ -25,6 +25,6 @@ model_path = "./output"
 my_chat_model = GPT2LMHeadModel.from_pretrained(model_path)
 my_chat_tokenizer = GPT2Tokenizer.from_pretrained(model_path)
 
-prompt = "What is the most promising future technology?" # Replace with desired prompt
+prompt = "What is the most promising future technology?" # Example prompt for testing
 response = generate_response(my_chat_model, my_chat_tokenizer, prompt, max_length=100)
 print("Generated response:", response)

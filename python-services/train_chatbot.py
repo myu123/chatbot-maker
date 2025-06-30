@@ -105,7 +105,7 @@ def generate_response(model, tokenizer, prompt, max_length=100):
 
 
 def main():
-    directory = "./training_files"  # Replace with the path to directory containing the files
+    directory = "./training_files"  # Path to directory containing training files
     model_output_path = "./output"
 
     # Train the chatbot
@@ -116,7 +116,7 @@ def main():
     tokenizer = GPT2Tokenizer.from_pretrained(model_output_path)
 
     # Test the chatbot
-    prompt = "What is carbon dioxide?"  # Replace with desired prompt
+    prompt = "What is carbon dioxide?"  # Example prompt for testing
     response = generate_response(model, tokenizer, prompt)
     print("Generated response:", response)
 
