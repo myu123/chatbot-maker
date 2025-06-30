@@ -43,10 +43,26 @@ chatbot-maker/
 
 ### Installation
 
-1. **Clone and setup the project:**
+1. **Clone and install dependencies:**
    ```bash
+   git clone <repository-url>
    cd chatbot-maker
-   # Follow the setup instructions in setup-instructions.txt
+   
+   # Install Python dependencies
+   cd python-services
+   pip install -r requirements.txt
+   
+   # Install backend dependencies
+   cd ../backend
+   npm install
+   
+   # Install frontend dependencies
+   cd ../frontend
+   npm install
+   
+   # Setup environment variables
+   cd ../backend
+   cp .env.example .env
    ```
 
 2. **Start all services:**
