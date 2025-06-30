@@ -1,6 +1,8 @@
 # Chatbot Maker
 
 A comprehensive full-stack application for training and chatting with custom GPT-2 chatbots using your own documents. Built with Vue.js, TypeScript, Node.js, and Python.
+![home_page](https://github.com/user-attachments/assets/9bad6641-ee2d-46d5-8b89-7f7d2efd3679)
+![train_page](https://github.com/user-attachments/assets/e29eb687-32cc-46d1-a6bc-5dcc9781f4e8)
 
 ## Features
 
