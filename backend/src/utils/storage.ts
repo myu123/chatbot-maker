@@ -2,67 +2,85 @@ import fs from 'fs/promises'
 import path from 'path'
 import { v4 as uuidv4 } from 'uuid'
 import type { TrainingFile, TrainingJob, ChatbotModel } from '@/types'
+import logger from '@/utils/logger'
+
+interface StorageData {
+  files: TrainingFile[]
+  jobs: TrainingJob[]
+  models: ChatbotModel[]
+  activeModelId: string | null
+}
+
+const EMPTY_DATA: StorageData = {
+  files: [],
+  jobs: [],
+  models: [],
+  activeModelId: null
+}
 
 class Storage {
   private readonly uploadsDir: string
   private readonly modelsDir: string
   private readonly dataFile: string
+  private initialized: Promise<void>
 
   constructor() {
     this.uploadsDir = path.join(process.cwd(), '..', 'uploads')
     this.modelsDir = path.join(process.cwd(), '..', 'models')
     this.dataFile = path.join(process.cwd(), '..', 'data.json')
-    this.initializeStorage()
+    this.initialized = this.initializeStorage()
   }
 
-  private async initializeStorage() {
+  private async initializeStorage(): Promise<void> {
     try {
-      await fs.mkdir(this.uploadsDir, { recursive: true })
-      await fs.mkdir(this.modelsDir, { recursive: true })
-      await fs.mkdir(path.join(process.cwd(), '..', 'logs'), { recursive: true })
-      
-      // Initialize data file if it doesn't exist
+      await Promise.all([
+        fs.mkdir(this.uploadsDir, { recursive: true }),
+        fs.mkdir(this.modelsDir, { recursive: true }),
+        fs.mkdir(path.join(process.cwd(), '..', 'logs'), { recursive: true })
+      ])
+
       try {
         await fs.access(this.dataFile)
       } catch {
-        await this.saveData({
-          files: [],
-          jobs: [],
-          models: [],
-          activeModelId: null
-        })
+        await this.saveData({ ...EMPTY_DATA })
       }
     } catch (error) {
-      console.error('Failed to initialize storage:', error)
+      logger.error('Failed to initialize storage', { error })
     }
   }
 
-  private async loadData() {
+  private async ensureReady(): Promise<void> {
+    await this.initialized
+  }
+
+  private async loadData(): Promise<StorageData> {
+    await this.ensureReady()
     try {
-      const data = await fs.readFile(this.dataFile, 'utf-8')
-      return JSON.parse(data)
+      const raw = await fs.readFile(this.dataFile, 'utf-8')
+      return JSON.parse(raw) as StorageData
     } catch {
-      return {
-        files: [],
-        jobs: [],
-        models: [],
-        activeModelId: null
-      }
+      return { ...EMPTY_DATA }
     }
   }
 
-  private async saveData(data: any) {
-    await fs.writeFile(this.dataFile, JSON.stringify(data, null, 2))
+  private async saveData(data: StorageData): Promise<void> {
+    // Write atomically: write to temp then rename
+    const tmp = this.dataFile + '.tmp'
+    await fs.writeFile(tmp, JSON.stringify(data, null, 2))
+    await fs.rename(tmp, this.dataFile)
   }
 
-  // File operations
+  // ---- File operations ----
+
   async saveFile(file: Express.Multer.File): Promise<TrainingFile> {
     const fileId = uuidv4()
-    const fileName = `${fileId}_${file.originalname}`
+    // Sanitize original filename
+    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')
+    const fileName = `${fileId}_${safeName}`
     const filePath = path.join(this.uploadsDir, fileName)
-    
+
     await fs.writeFile(filePath, file.buffer)
-    
+
     const trainingFile: TrainingFile = {
       id: fileId,
       name: file.originalname,
@@ -86,34 +104,38 @@ class Storage {
 
   async deleteFile(fileId: string): Promise<void> {
     const data = await this.loadData()
-    const fileIndex = data.files.findIndex((f: TrainingFile) => f.id === fileId)
-    
-    if (fileIndex === -1) {
+    const idx = data.files.findIndex((f) => f.id === fileId)
+
+    if (idx === -1) {
       throw new Error('File not found')
     }
 
-    const file = data.files[fileIndex]
-    
+    const file = data.files[idx]!
+
     try {
       await fs.unlink(file.path)
     } catch (error) {
-      console.warn('Failed to delete file from filesystem:', error)
+      logger.warn('Could not delete file from disk (may already be gone)', {
+        path: file.path,
+        error
+      })
     }
 
-    data.files.splice(fileIndex, 1)
+    data.files.splice(idx, 1)
     await this.saveData(data)
   }
 
-  // Training job operations
-  async createTrainingJob(config: any): Promise<string> {
+  // ---- Training job operations ----
+
+  async createTrainingJob(config: TrainingFile extends never ? never : Record<string, unknown>): Promise<string> {
     const jobId = uuidv4()
     const job: TrainingJob = {
       id: jobId,
       status: 'pending',
-      config,
+      config: config as TrainingJob['config'],
       progress: 0,
       currentEpoch: 0,
-      totalEpochs: config.epochs,
+      totalEpochs: (config as Record<string, number>).epochs ?? 0,
       startTime: new Date()
     }
 
@@ -126,22 +148,23 @@ class Storage {
 
   async updateTrainingJob(jobId: string, updates: Partial<TrainingJob>): Promise<void> {
     const data = await this.loadData()
-    const jobIndex = data.jobs.findIndex((j: TrainingJob) => j.id === jobId)
-    
-    if (jobIndex === -1) {
+    const idx = data.jobs.findIndex((j) => j.id === jobId)
+
+    if (idx === -1) {
       throw new Error('Job not found')
     }
 
-    data.jobs[jobIndex] = { ...data.jobs[jobIndex], ...updates }
+    data.jobs[idx] = { ...data.jobs[idx]!, ...updates }
     await this.saveData(data)
   }
 
   async getTrainingJob(jobId: string): Promise<TrainingJob | null> {
     const data = await this.loadData()
-    return data.jobs.find((j: TrainingJob) => j.id === jobId) || null
+    return data.jobs.find((j) => j.id === jobId) ?? null
   }
 
-  // Model operations
+  // ---- Model operations ----
+
   async saveModel(model: Omit<ChatbotModel, 'id' | 'createdAt'>): Promise<ChatbotModel> {
     const modelId = uuidv4()
     const newModel: ChatbotModel = {
@@ -164,54 +187,48 @@ class Storage {
 
   async deleteModel(modelId: string): Promise<void> {
     const data = await this.loadData()
-    const modelIndex = data.models.findIndex((m: ChatbotModel) => m.id === modelId)
-    
-    if (modelIndex === -1) {
+    const idx = data.models.findIndex((m) => m.id === modelId)
+
+    if (idx === -1) {
       throw new Error('Model not found')
     }
 
-    const model = data.models[modelIndex]
-    
-    // Delete model files
+    const model = data.models[idx]!
+
     try {
       await fs.rm(model.path, { recursive: true, force: true })
     } catch (error) {
-      console.warn('Failed to delete model files:', error)
+      logger.warn('Could not delete model directory', { path: model.path, error })
     }
 
-    data.models.splice(modelIndex, 1)
-    
-    // Clear active model if it was deleted
+    data.models.splice(idx, 1)
+
     if (data.activeModelId === modelId) {
       data.activeModelId = null
     }
-    
+
     await this.saveData(data)
   }
 
   async setActiveModel(modelId: string): Promise<void> {
     const data = await this.loadData()
-    const model = data.models.find((m: ChatbotModel) => m.id === modelId)
-    
+    const model = data.models.find((m) => m.id === modelId)
+
     if (!model) {
       throw new Error('Model not found')
     }
 
-    // Update all models to inactive
-    data.models.forEach((m: ChatbotModel) => {
-      m.isActive = false
-    })
-
-    // Set the selected model as active
-    model.isActive = true
+    for (const m of data.models) {
+      m.isActive = m.id === modelId
+    }
     data.activeModelId = modelId
-    
+
     await this.saveData(data)
   }
 
   async getActiveModel(): Promise<ChatbotModel | null> {
     const data = await this.loadData()
-    return data.models.find((m: ChatbotModel) => m.isActive) || null
+    return data.models.find((m) => m.isActive) ?? null
   }
 
   getUploadsDir(): string {

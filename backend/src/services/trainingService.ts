@@ -14,23 +14,16 @@ class TrainingService {
   }
 
   async startTraining(config: TrainingConfig): Promise<string> {
-    try {
-      const jobId = await storage.createTrainingJob(config)
-      
-      // Start training in background
-      this.runTraining(jobId, config)
-      
-      return jobId
-    } catch (error) {
-      logger.error('Failed to start training:', error)
-      throw error
-    }
+    const jobId = await storage.createTrainingJob(config as unknown as Record<string, unknown>)
+    // Fire and forget — progress is tracked via stdout parsing
+    this.runTraining(jobId, config)
+    return jobId
   }
 
   private async runTraining(jobId: string, config: TrainingConfig) {
     try {
       await storage.updateTrainingJob(jobId, { status: 'running' })
-      
+
       const pythonScript = path.join(process.cwd(), '..', 'python-services', 'enhanced_trainer.py')
       const uploadsDir = storage.getUploadsDir()
       const modelsDir = storage.getModelsDir()
@@ -49,82 +42,106 @@ class TrainingService {
         '--job-id', jobId
       ]
 
-      logger.info(`Starting training job ${jobId} with args:`, args)
+      logger.info(`Starting training job ${jobId}`, {
+        modelSize: config.modelSize,
+        epochs: config.epochs,
+        batchSize: config.batchSize,
+        learningRate: config.learningRate
+      })
 
-      const childProcess = spawn('python', args, {
+      const child = spawn('python', args, {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, PYTHONUNBUFFERED: '1' }
       })
 
-      this.activeJobs.set(jobId, childProcess)
+      this.activeJobs.set(jobId, child)
 
-      // Handle stdout for progress updates
-      childProcess.stdout?.on('data', (data: Buffer) => {
-        const output = data.toString()
-        logger.info(`Training ${jobId} stdout:`, output)
-        
-        try {
-          // Try to parse JSON progress updates
-          const lines = output.split('\n').filter((line: string) => line.trim())
-          for (const line of lines) {
-            if (line.startsWith('{')) {
-              const progressData = JSON.parse(line)
-              this.handleProgressUpdate(jobId, progressData)
+      // Buffer partial lines from stdout
+      let stdoutBuffer = ''
+      child.stdout?.on('data', (chunk: Buffer) => {
+        stdoutBuffer += chunk.toString()
+        const lines = stdoutBuffer.split('\n')
+        // Keep the last (possibly incomplete) line in the buffer
+        stdoutBuffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed) continue
+          if (trimmed.startsWith('{')) {
+            try {
+              const parsed = JSON.parse(trimmed)
+              this.handleProgressUpdate(jobId, parsed)
+            } catch {
+              logger.debug(`Training ${jobId} non-JSON output: ${trimmed}`)
             }
+          } else {
+            logger.info(`Training ${jobId}: ${trimmed}`)
           }
-        } catch (error) {
-          // Not JSON, just log it
-          logger.info(`Training ${jobId} output:`, output)
         }
       })
 
-      // Handle stderr
-      childProcess.stderr?.on('data', (data: Buffer) => {
-        const error = data.toString()
-        logger.error(`Training ${jobId} stderr:`, error)
+      // Collect stderr but don't treat it all as errors (transformers/torch log to stderr)
+      let stderrOutput = ''
+      child.stderr?.on('data', (chunk: Buffer) => {
+        const text = chunk.toString()
+        stderrOutput += text
+        // Only log a sample to avoid flooding
+        if (stderrOutput.length < 5000) {
+          logger.debug(`Training ${jobId} stderr: ${text.trim()}`)
+        }
       })
 
-      // Handle process completion
-      childProcess.on('close', async (code: number | null) => {
+      child.on('close', async (code: number | null) => {
         this.activeJobs.delete(jobId)
-        
+
+        // Flush remaining buffer
+        if (stdoutBuffer.trim().startsWith('{')) {
+          try {
+            this.handleProgressUpdate(jobId, JSON.parse(stdoutBuffer.trim()))
+          } catch { /* ignore */ }
+        }
+
         if (code === 0) {
           await this.handleTrainingSuccess(jobId, modelOutputPath, config)
         } else {
-          await this.handleTrainingError(jobId, `Training process exited with code ${code}`)
+          const errorSnippet = stderrOutput.slice(-500).trim()
+          await this.handleTrainingError(
+            jobId,
+            `Process exited with code ${code}${errorSnippet ? ': ' + errorSnippet : ''}`
+          )
         }
       })
 
-      childProcess.on('error', async (error: Error) => {
+      child.on('error', async (error: Error) => {
         this.activeJobs.delete(jobId)
-        logger.error(`Training ${jobId} process error:`, error)
+        logger.error(`Training ${jobId} spawn error`, { error: error.message })
         await this.handleTrainingError(jobId, error.message)
       })
 
     } catch (error) {
-      logger.error(`Failed to run training ${jobId}:`, error)
+      logger.error(`Failed to launch training ${jobId}`, { error })
       await this.handleTrainingError(jobId, (error as Error).message)
     }
   }
 
-  private async handleProgressUpdate(jobId: string, progressData: any) {
+  private async handleProgressUpdate(jobId: string, data: Record<string, unknown>) {
     try {
-      await storage.updateTrainingJob(jobId, {
-        progress: progressData.progress || 0,
-        currentEpoch: progressData.epoch || 0,
-        loss: progressData.loss,
-        estimatedTimeRemaining: progressData.eta
-      })
+      const updates: Partial<import('@/types').TrainingJob> = {}
 
-      // Emit to connected clients
+      if (typeof data.progress === 'number') updates.progress = data.progress
+      if (typeof data.epoch === 'number') updates.currentEpoch = data.epoch
+      if (typeof data.loss === 'number') updates.loss = data.loss
+      if (typeof data.eta === 'number') updates.estimatedTimeRemaining = data.eta
+
+      if (Object.keys(updates).length > 0) {
+        await storage.updateTrainingJob(jobId, updates)
+      }
+
       if (this.io) {
-        this.io.emit('training-progress', {
-          jobId,
-          ...progressData
-        })
+        this.io.emit('training-progress', { jobId, ...data })
       }
     } catch (error) {
-      logger.error('Failed to handle progress update:', error)
+      logger.error('Failed to process progress update', { jobId, error })
     }
   }
 
@@ -137,7 +154,6 @@ class TrainingService {
         modelPath
       })
 
-      // Save the trained model
       const files = await storage.getFiles()
       await storage.saveModel({
         name: `Model_${new Date().toISOString().split('T')[0]}_${jobId.slice(0, 8)}`,
@@ -148,18 +164,13 @@ class TrainingService {
         isActive: false
       })
 
-      // Emit completion event
       if (this.io) {
-        this.io.emit('training-complete', {
-          jobId,
-          modelPath,
-          epochs: config.epochs
-        })
+        this.io.emit('training-complete', { jobId, modelPath, epochs: config.epochs })
       }
 
       logger.info(`Training ${jobId} completed successfully`)
     } catch (error) {
-      logger.error(`Failed to handle training success for ${jobId}:`, error)
+      logger.error(`Failed to finalize training ${jobId}`, { error })
     }
   }
 
@@ -171,34 +182,48 @@ class TrainingService {
         endTime: new Date()
       })
 
-      // Emit error event
       if (this.io) {
-        this.io.emit('training-error', {
-          jobId,
-          error
-        })
+        this.io.emit('training-error', { jobId, error })
       }
 
-      logger.error(`Training ${jobId} failed:`, error)
+      logger.error(`Training ${jobId} failed: ${error}`)
     } catch (err) {
-      logger.error(`Failed to handle training error for ${jobId}:`, err)
+      logger.error(`Failed to record training error for ${jobId}`, { err })
     }
   }
 
   async stopTraining(jobId: string): Promise<void> {
-    const childProcess = this.activeJobs.get(jobId)
-    
-    if (childProcess) {
-      childProcess.kill('SIGTERM')
-      this.activeJobs.delete(jobId)
-      
-      await storage.updateTrainingJob(jobId, {
-        status: 'cancelled',
-        endTime: new Date()
-      })
-      
-      logger.info(`Training ${jobId} stopped`)
+    const child = this.activeJobs.get(jobId)
+
+    if (!child) {
+      logger.warn(`Stop requested for unknown/finished job ${jobId}`)
+      return
     }
+
+    child.kill('SIGTERM')
+
+    // Give it a few seconds to shut down cleanly, then force-kill
+    const forceKillTimeout = setTimeout(() => {
+      if (!child.killed) {
+        child.kill('SIGKILL')
+        logger.warn(`Force-killed training ${jobId}`)
+      }
+    }, 10_000)
+
+    child.once('close', () => clearTimeout(forceKillTimeout))
+
+    this.activeJobs.delete(jobId)
+
+    await storage.updateTrainingJob(jobId, {
+      status: 'cancelled',
+      endTime: new Date()
+    })
+
+    if (this.io) {
+      this.io.emit('training-cancelled', { jobId })
+    }
+
+    logger.info(`Training ${jobId} stopped`)
   }
 
   async getTrainingStatus(jobId: string) {

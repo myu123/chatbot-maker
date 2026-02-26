@@ -21,7 +21,7 @@ export const useAppStore = defineStore('app', () => {
 
   // Getters
   const totalFiles = computed(() => files.value.length)
-  const totalFileSize = computed(() => 
+  const totalFileSize = computed(() =>
     files.value.reduce((sum, file) => sum + file.size, 0)
   )
   const hasFiles = computed(() => files.value.length > 0)
@@ -35,7 +35,6 @@ export const useAppStore = defineStore('app', () => {
       files.value = await fileApi.getFiles()
     } catch (error) {
       console.error('Failed to load files:', error)
-      throw error
     } finally {
       isLoading.value = false
     }
@@ -44,9 +43,9 @@ export const useAppStore = defineStore('app', () => {
   const uploadFiles = async (newFiles: File[]) => {
     try {
       isLoading.value = true
-      const uploadedFiles = await fileApi.uploadFiles(newFiles)
-      files.value.push(...uploadedFiles)
-      return uploadedFiles
+      const uploaded = await fileApi.uploadFiles(newFiles)
+      files.value.push(...uploaded)
+      return uploaded
     } catch (error) {
       console.error('Failed to upload files:', error)
       throw error
@@ -56,13 +55,8 @@ export const useAppStore = defineStore('app', () => {
   }
 
   const deleteFile = async (fileId: string) => {
-    try {
-      await fileApi.deleteFile(fileId)
-      files.value = files.value.filter(f => f.id !== fileId)
-    } catch (error) {
-      console.error('Failed to delete file:', error)
-      throw error
-    }
+    await fileApi.deleteFile(fileId)
+    files.value = files.value.filter(f => f.id !== fileId)
   }
 
   const loadModels = async () => {
@@ -71,40 +65,34 @@ export const useAppStore = defineStore('app', () => {
       models.value = await modelApi.getModels()
     } catch (error) {
       console.error('Failed to load models:', error)
-      throw error
     } finally {
       isLoading.value = false
     }
   }
 
   const deleteModel = async (modelId: string) => {
-    try {
-      await modelApi.deleteModel(modelId)
-      models.value = models.value.filter(m => m.id !== modelId)
-      if (activeModel.value?.id === modelId) {
-        activeModel.value = null
-      }
-    } catch (error) {
-      console.error('Failed to delete model:', error)
-      throw error
+    await modelApi.deleteModel(modelId)
+    models.value = models.value.filter(m => m.id !== modelId)
+    if (activeModel.value?.id === modelId) {
+      activeModel.value = null
     }
   }
 
   const setActiveModel = async (modelId: string) => {
-    try {
-      await modelApi.setActiveModel(modelId)
-      activeModel.value = models.value.find(m => m.id === modelId) || null
-    } catch (error) {
-      console.error('Failed to set active model:', error)
-      throw error
-    }
+    await modelApi.setActiveModel(modelId)
+    // Update local state to reflect the change
+    models.value.forEach(m => {
+      (m as Record<string, unknown>).isActive = m.id === modelId
+    })
+    activeModel.value = models.value.find(m => m.id === modelId) ?? null
   }
 
   const loadActiveModel = async () => {
     try {
       activeModel.value = await chatApi.getActiveModel()
-    } catch (error) {
-      console.error('Failed to load active model:', error)
+    } catch {
+      // Chat service may not be running yet — that's fine
+      activeModel.value = null
     }
   }
 
@@ -123,22 +111,19 @@ export const useAppStore = defineStore('app', () => {
 
     try {
       const response = await chatApi.sendMessage(content, activeModel.value.id)
-      const botMessage: ChatMessage = {
+      chatMessages.value.push({
         id: (Date.now() + 1).toString(),
         content: response,
         isUser: false,
         timestamp: new Date()
-      }
-      chatMessages.value.push(botMessage)
+      })
     } catch (error) {
-      console.error('Failed to send message:', error)
-      const errorMessage: ChatMessage = {
+      chatMessages.value.push({
         id: (Date.now() + 1).toString(),
-        content: 'Sorry, I encountered an error processing your message.',
+        content: 'Sorry, I could not generate a response. Please check that the chat service is running.',
         isUser: false,
         timestamp: new Date()
-      }
-      chatMessages.value.push(errorMessage)
+      })
       throw error
     }
   }
@@ -148,10 +133,19 @@ export const useAppStore = defineStore('app', () => {
   }
 
   const initializeSocket = () => {
-    const socket = socketService.connect()
-    
+    socketService.connect()
+
     socketService.onTrainingProgress((status: TrainingStatus) => {
-      trainingStatus.value = status
+      trainingStatus.value = {
+        ...trainingStatus.value,
+        isTraining: true,
+        status: 'training',
+        progress: status.progress ?? trainingStatus.value.progress,
+        currentEpoch: status.currentEpoch ?? trainingStatus.value.currentEpoch,
+        totalEpochs: status.totalEpochs ?? trainingStatus.value.totalEpochs,
+        loss: status.loss ?? trainingStatus.value.loss,
+        estimatedTimeRemaining: status.estimatedTimeRemaining ?? trainingStatus.value.estimatedTimeRemaining
+      }
     })
 
     socketService.onTrainingComplete((result) => {
@@ -162,7 +156,7 @@ export const useAppStore = defineStore('app', () => {
         totalEpochs: result.epochs,
         status: 'completed'
       }
-      loadModels() // Refresh models list
+      loadModels()
     })
 
     socketService.onTrainingError((error) => {
@@ -172,7 +166,7 @@ export const useAppStore = defineStore('app', () => {
         currentEpoch: 0,
         totalEpochs: 0,
         status: 'error',
-        error
+        error: typeof error === 'string' ? error : error?.error || 'Unknown error'
       }
     })
   }
@@ -182,22 +176,17 @@ export const useAppStore = defineStore('app', () => {
   }
 
   return {
-    // State
     files,
     models,
     activeModel,
     trainingStatus,
     chatMessages,
     isLoading,
-    
-    // Getters
     totalFiles,
     totalFileSize,
     hasFiles,
     hasActiveModel,
     canStartTraining,
-    
-    // Actions
     loadFiles,
     uploadFiles,
     deleteFile,

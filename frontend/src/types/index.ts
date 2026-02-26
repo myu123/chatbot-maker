@@ -40,4 +40,5 @@ export interface ChatbotModel {
   config: TrainingConfig
   status: 'ready' | 'training' | 'error'
   fileCount: number
+  isActive?: boolean
 }

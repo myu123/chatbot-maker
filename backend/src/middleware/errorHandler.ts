@@ -5,52 +5,54 @@ export const errorHandler = (
   error: Error,
   req: Request,
   res: Response,
-  next: NextFunction
+  _next: NextFunction
 ): void => {
-  logger.error('Error caught by error handler:', {
+  logger.error('Unhandled error', {
     message: error.message,
-    stack: error.stack,
     url: req.url,
     method: req.method,
     ip: req.ip,
-    userAgent: req.get('User-Agent')
+    stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
   })
 
-  // Multer errors
-  if (error.message.includes('Only .txt and .pdf files are allowed')) {
-    res.status(400).json({
+  // Known error patterns from multer
+  const knownErrors: Record<string, { status: number; error: string; message: string }> = {
+    'Only .txt and .pdf files are allowed': {
+      status: 400,
       error: 'Invalid file type',
-      message: 'Only .txt and .pdf files are allowed'
-    })
-    return
-  }
-
-  if (error.message.includes('File too large')) {
-    res.status(400).json({
+      message: 'Only .txt and .pdf files are allowed.'
+    },
+    'File too large': {
+      status: 400,
       error: 'File too large',
-      message: 'Maximum file size is 50MB'
-    })
-    return
-  }
-
-  if (error.message.includes('Too many files')) {
-    res.status(400).json({
+      message: 'Maximum file size is 50 MB.'
+    },
+    'Too many files': {
+      status: 400,
       error: 'Too many files',
-      message: 'Maximum 10 files allowed at once'
-    })
-    return
+      message: 'Maximum 10 files allowed per upload.'
+    }
   }
 
-  // Generic error response
+  for (const [pattern, response] of Object.entries(knownErrors)) {
+    if (error.message.includes(pattern)) {
+      res.status(response.status).json(response)
+      return
+    }
+  }
+
+  // Generic fallback
   res.status(500).json({
     error: 'Internal server error',
-    message: process.env.NODE_ENV === 'development' ? error.message : 'Something went wrong'
+    message: process.env.NODE_ENV === 'development'
+      ? error.message
+      : 'Something went wrong. Please try again.'
   })
 }
 
 export const notFoundHandler = (req: Request, res: Response): void => {
   res.status(404).json({
     error: 'Not found',
-    message: `Route ${req.originalUrl} not found`
+    message: `Route ${req.method} ${req.originalUrl} does not exist.`
   })
 }

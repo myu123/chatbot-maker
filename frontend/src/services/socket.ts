@@ -1,13 +1,24 @@
 import { io, Socket } from 'socket.io-client'
-import type { TrainingStatus } from '@/types'
 
 class SocketService {
   private socket: Socket | null = null
 
-  connect() {
+  connect(): Socket {
     if (!this.socket) {
       this.socket = io('/', {
-        transports: ['websocket', 'polling']
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        reconnectionAttempts: 10,
+        reconnectionDelay: 1000,
+        reconnectionDelayMax: 5000
+      })
+
+      this.socket.on('connect', () => {
+        console.debug('[socket] connected:', this.socket?.id)
+      })
+
+      this.socket.on('disconnect', (reason) => {
+        console.debug('[socket] disconnected:', reason)
       })
     }
     return this.socket
@@ -20,34 +31,24 @@ class SocketService {
     }
   }
 
-  onTrainingProgress(callback: (status: TrainingStatus) => void) {
-    if (this.socket) {
-      this.socket.on('training-progress', callback)
-    }
+  onTrainingProgress(callback: (data: Record<string, unknown>) => void) {
+    this.socket?.on('training-progress', callback)
   }
 
-  onTrainingComplete(callback: (result: any) => void) {
-    if (this.socket) {
-      this.socket.on('training-complete', callback)
-    }
+  onTrainingComplete(callback: (result: Record<string, unknown>) => void) {
+    this.socket?.on('training-complete', callback)
   }
 
-  onTrainingError(callback: (error: string) => void) {
-    if (this.socket) {
-      this.socket.on('training-error', callback)
-    }
+  onTrainingError(callback: (error: Record<string, unknown> | string) => void) {
+    this.socket?.on('training-error', callback)
   }
 
   subscribeToTraining(jobId: string) {
-    if (this.socket) {
-      this.socket.emit('subscribe-training', jobId)
-    }
+    this.socket?.emit('subscribe-training', jobId)
   }
 
   unsubscribeFromTraining(jobId: string) {
-    if (this.socket) {
-      this.socket.emit('unsubscribe-training', jobId)
-    }
+    this.socket?.emit('unsubscribe-training', jobId)
   }
 }
 
